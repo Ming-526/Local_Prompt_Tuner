@@ -18,7 +18,7 @@ It is a **pure frontend application** (HTML + JS) with no backend server require
 
 ### ✨ Key Features
 
-* **⚡ Zero Deployment:** Just download the `index.html` file and open it in your browser. No Python, Node.js, or Docker required.
+* **⚡ Zero Deployment:** Just download the `index_standalone.html` file and open it in your browser. No Python, Node.js, or Docker required.
 * **🔒 Privacy First:** Uses a "Local-First" architecture. Your API keys and prompt data never leave your browser (except when sending requests directly to your specified LLM API endpoint).
 * **🧪 Batch Testing:** Supports batch generation with variable injection (Mustache syntax `{{variable}}`).
 * **📊 Data Management:** * Import/Export test cases via **Excel (.xlsx)**.
@@ -43,7 +43,7 @@ It is a **pure frontend application** (HTML + JS) with no backend server require
 
 ### ✨ 核心功能
 
-* **⚡ 零部署成本：** 只需下载 `index.html` 文件并在浏览器打开即可使用。无需安装 Python、Node.js 或 Docker 环境。
+* **⚡ 零部署成本：** 只需下载 `index_standalone.html` 文件并在浏览器打开即可使用。无需安装 Python、Node.js 或 Docker 环境。
 * **🔒 隐私优先：** 采用“本地优先”架构。除了向您指定的 LLM API 发送推理请求外，您的 API Key 和数据永远不会离开浏览器上传到第三方服务器。
 * **🧪 批量测试：** 支持基于变量注入的批量生成测试（使用 `{{变量名}}` 语法）。
 * **📊 数据管理：** * 支持通过 **Excel (.xlsx)** 导入/导出测试用例。
@@ -51,4 +51,19 @@ It is a **pure frontend application** (HTML + JS) with no backend server require
 * **🔌 灵活的接口支持：** 兼容所有 OpenAI 格式的 API 接口（支持自定义 Base URL，完美适配本地部署的模型）。
 
 ### 🚀 快速开始
-1
+1. 下载 `index_standalone.html` 文件。
+2. 直接使用 Chrome、Edge 或 Safari 浏览器打开。
+3. 进入 **“设置”** 标签页，填入您的 API Key 和模型地址。
+4. 开始您的 Prompt 调优之旅！
+
+---
+
+### 📄 License / 许可协议
+This project is licensed under the **MIT License**. You are free to use, modify, and distribute it.
+本项目采用 **MIT 许可协议**。您可以自由地使用、修改及分发代码。
+
+---
+
+### 📷 Screenshots / 截图
+*(Tip: Upload your screenshot to the `images` folder and link it here)*
+*(提示：将截图上传至 `images` 文件夹并在此处引用)*
