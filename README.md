@@ -65,5 +65,5 @@ This project is licensed under the **MIT License**. You are free to use, modify,
 ---
 
 ### 📷 Screenshots / 截图
-*(Tip: Upload your screenshot to the `images` folder and link it here)*
-*(提示：将截图上传至 `images` 文件夹并在此处引用)*
+
+![1768210711428](images/1768210711428.png)
