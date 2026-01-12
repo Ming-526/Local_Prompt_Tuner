@@ -1,0 +1,1527 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prompt 调优与批量测试平台 (纯前端版)</title>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 SheetJS (XLSX) 用于导出 Excel -->
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    <!-- 引入 Inter 字体 -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <!-- 引入 FontAwesome 图标 (用于评分星星) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        /* 隐藏滚动条但允许滚动 */
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .tab-button.active { border-color: #3b82f6; background-color: #eff6ff; color: #1d4ed8; font-weight: 600; }
+        
+        /* 评分星星样式 */
+        .star-rating { direction: rtl; display: inline-flex; }
+        .star-rating input { display: none; }
+        .star-rating label { color: #d1d5db; font-size: 1.25rem; padding: 0 2px; cursor: pointer; transition: color 0.2s; }
+        .star-rating label:hover,
+        .star-rating label:hover ~ label,
+        .star-rating input:checked ~ label { color: #f59e0b; }
+        
+        /* 表格单元格内容样式 */
+        .cell-content {
+            max-height: 80px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 0.85rem;
+        }
+    </style>
+
+    <script>
+        // 全局变量声明
+        window.appData = {
+            project: {
+                name: '新测试项目',
+                modelUrl: 'http://127.0.0.1:8000/v1', // 默认尝试本地 vLLM/OpenAI 兼容地址
+                modelName: '', 
+                template: '请根据以下输入，写一个关于{{主题}}的{{风格}}的故事:\n输入1: {{输入1}}\n输入2: {{输入2}}',
+                variables: [], 
+                samples: [], 
+                results: [], 
+                metaPrompt: "生成 5 个关于科幻小说或历史事件的测试样本。", 
+                sampleGenSystemPrompt: "你是一个测试数据生成助手。请根据用户要求生成 JSON 数组。\n数组中每个对象必须包含且仅包含以下键：{VARIABLES}。\n直接返回 JSON 数组，不要包含 Markdown 标记或额外解释。\n请生成 5 条数据。",
+                scoringSystemPrompt: "你是一个公正的评判助手。请根据用户的输入 Prompt 和模型的输出 Output，对输出质量进行打分（1-5分）。\n请返回 JSON 格式，包含 score (数字) 和 reason (字符串) 两个字段。\n例如：{\"score\": 4, \"reason\": \"回答准确，但略显啰嗦。\"}",
+                batchConfig: {
+                    concurrency: 1,
+                    temperature: 0.7,
+                    maxTokens: 10240
+                }
+            }
+        };
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('user-id-display').textContent = `Standalone Mode`;
+            window.appData.loadProjectData();
+        });
+    </script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+    <div id="app" class="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
+        <!-- 头部 -->
+        <header class="mb-6 bg-white shadow-sm rounded-xl p-4 flex justify-between items-center border border-gray-100">
+            <div>
+                <h1 class="text-2xl font-bold text-gray-900">Prompt 调优工作台</h1>
+                <p class="text-xs text-gray-400 mt-1">纯前端版 · 数据存储在本地浏览器</p>
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="flex gap-2">
+                    <button onclick="window.appData.exportProject()" class="text-xs bg-gray-100 hover:bg-gray-200 px-3 py-1 rounded text-gray-700 border border-gray-300 transition">
+                        <i class="fas fa-download mr-1"></i> 导出项目
+                    </button>
+                    <input type="file" id="importProjectInput" class="hidden" onchange="window.appData.importProject(this)">
+                    <button onclick="document.getElementById('importProjectInput').click()" class="text-xs bg-gray-100 hover:bg-gray-200 px-3 py-1 rounded text-gray-700 border border-gray-300 transition">
+                        <i class="fas fa-upload mr-1"></i> 导入项目
+                    </button>
+                </div>
+                <div class="text-right border-l pl-4">
+                    <span id="user-id-display" class="text-xs font-mono bg-gray-100 px-2 py-1 rounded text-gray-600">Loading...</span>
+                    <div id="saveStatus" class="text-xs text-green-600 mt-1 opacity-0 transition-opacity duration-500">已保存到本地</div>
+                </div>
+            </div>
+        </header>
+
+        <!-- 导航 -->
+        <div class="flex border-b border-gray-200 mb-6 bg-white rounded-t-lg px-2 pt-2">
+            <button class="tab-button active px-6 py-3 text-sm font-medium border-b-2 border-transparent hover:text-blue-600 focus:outline-none transition-colors" data-tab="setup">
+                <i class="fas fa-sliders-h mr-2"></i>配置 Prompt
+            </button>
+            <button class="tab-button px-6 py-3 text-sm font-medium border-b-2 border-transparent hover:text-blue-600 focus:outline-none transition-colors" data-tab="samples">
+                <i class="fas fa-database mr-2"></i>测试样本
+            </button>
+            <button class="tab-button px-6 py-3 text-sm font-medium border-b-2 border-transparent hover:text-blue-600 focus:outline-none transition-colors" data-tab="results">
+                <i class="fas fa-check-circle mr-2"></i>批量测试与评分
+            </button>
+        </div>
+
+        <!-- 1. 配置 Tab -->
+        <div id="tab-setup" class="tab-content block animate-fade-in">
+            <div class="bg-white shadow-lg rounded-xl p-6 border border-gray-100">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div class="md:col-span-2 space-y-6">
+                        <div>
+                            <label class="block text-sm font-semibold text-gray-700 mb-1">Prompt 模板</label>
+                            <p class="text-xs text-gray-500 mb-2">使用 <code class="bg-gray-100 px-1 rounded">{{变量名}}</code> 定义动态部分。</p>
+                            <textarea id="promptTemplate" rows="8" class="w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-3 border font-mono text-sm leading-relaxed" placeholder="例如: 请为{{UserType}}写一个关于{{Topic}}的标语..."></textarea>
+                        </div>
+                        <div class="flex justify-end">
+                            <button id="extractVariablesBtn" class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 text-sm font-medium transition shadow-sm">
+                                <i class="fas fa-sync-alt mr-1"></i> 解析变量
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="bg-gray-50 p-5 rounded-lg border border-gray-200 h-fit">
+                        <h3 class="text-sm font-semibold text-gray-800 mb-4">连接设置</h3>
+                        <div class="space-y-4">
+                             <div>
+                                <label class="block text-xs font-medium text-gray-600 mb-1">OpenAI/vLLM API Base URL</label>
+                                <input type="text" id="modelUrl" class="w-full rounded border-gray-300 text-sm p-2 border focus:ring-blue-500 focus:border-blue-500" placeholder="http://127.0.0.1:8000/v1">
+                                <p class="text-[10px] text-orange-500 mt-1">* 需包含 /v1 (如果 API 需要)。确保允许跨域 (CORS)。</p>
+                            </div>
+                            
+                            <!-- 模型名称改为下拉选择 -->
+                            <div>
+                                <label class="block text-xs font-medium text-gray-600 mb-1">选择模型</label>
+                                <div class="flex gap-2">
+                                    <select id="modelName" class="w-full rounded border-gray-300 text-sm p-2 border focus:ring-blue-500 focus:border-blue-500 bg-white">
+                                        <option value="" disabled selected>请先获取模型列表...</option>
+                                    </select>
+                                    <button id="fetchModelsBtn" class="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded border border-gray-300 text-xs whitespace-nowrap" title="从服务器获取模型列表">
+                                        <i class="fas fa-sync-alt"></i>
+                                    </button>
+                                </div>
+                                <p id="fetchModelStatus" class="text-[10px] text-gray-400 mt-1 h-4"></p>
+                            </div>
+
+                            <div class="pt-4 border-t border-gray-200">
+                                <label class="block text-xs font-medium text-gray-600 mb-2">已识别变量</label>
+                                <div id="variableList" class="flex flex-wrap gap-2 min-h-[40px]">
+                                    <span class="text-gray-400 text-xs italic">暂无变量</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 2. 样本 Tab -->
+        <div id="tab-samples" class="tab-content hidden animate-fade-in">
+            <div class="bg-white shadow-lg rounded-xl p-6 border border-gray-100">
+                
+                <!-- 变量展示区域 -->
+                <div class="mb-6">
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">当前生效变量</label>
+                    <div id="sampleVariableList" class="flex flex-wrap gap-2 p-3 bg-gray-50 rounded-lg border border-gray-200 min-h-[46px]">
+                        <span class="text-gray-400 text-xs italic">暂无变量</span>
+                    </div>
+                </div>
+
+                <!-- AI 生成器 -->
+                <div class="bg-gradient-to-r from-indigo-50 to-blue-50 border border-indigo-100 rounded-lg p-5 mb-8">
+                    <div class="flex items-center justify-between mb-3">
+                        <h3 class="text-sm font-bold text-indigo-900 flex items-center">
+                            <i class="fas fa-magic mr-2 text-indigo-500"></i> AI 自动生成样本
+                        </h3>
+                        <span class="text-xs text-indigo-600 bg-indigo-100 px-2 py-1 rounded">推荐</span>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <div class="flex justify-between items-center mb-1">
+                            <label class="text-xs font-semibold text-indigo-800">系统提示词 (System Prompt)</label>
+                            <span class="text-[10px] text-indigo-400">可用变量: {VARIABLES}</span>
+                        </div>
+                        <textarea id="sampleGenSystemPromptInput" rows="3" class="w-full rounded-md border-indigo-200 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 p-2 text-xs resize-y text-gray-700 font-mono" placeholder="系统提示词..."></textarea>
+                    </div>
+
+                    <div class="flex gap-4">
+                        <div class="flex-grow">
+                            <label class="block text-xs font-semibold text-indigo-800 mb-1">生成指令 (User Prompt)</label>
+                            <textarea id="metaPromptInput" rows="2" class="w-full rounded-md border-indigo-200 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 p-3 text-sm resize-y" placeholder="描述你想要生成的测试数据，例如：生成 5 个关于不同节日的营销文案场景，包含针对不同年龄段的用户。"></textarea>
+                        </div>
+                        <button id="generateSamplesBtn" class="self-end px-5 py-3 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm font-medium shadow-md transition whitespace-nowrap">
+                            生成样本
+                        </button>
+                    </div>
+                    <div id="generationSampleStatus" class="mt-2 text-xs font-medium h-4"></div>
+                </div>
+
+                <!-- 手动/JSON 编辑器 -->
+                <div>
+                    <div class="flex justify-between items-end mb-2">
+                        <h3 class="text-sm font-semibold text-gray-700">JSON 数据源</h3>
+                        <div class="space-x-2 flex items-center">
+                            <input type="file" id="importSamplesInput" class="hidden" accept=".xlsx, .xls">
+                            <button onclick="document.getElementById('importSamplesInput').click()" class="text-xs text-blue-600 hover:text-blue-800 font-medium mr-2">
+                                <i class="fas fa-file-import mr-1"></i>导入样本 (.xlsx)
+                            </button>
+                            <button id="exportSamplesBtn" class="text-xs text-blue-600 hover:text-blue-800 font-medium mr-2">
+                                <i class="fas fa-file-excel mr-1"></i>导出样本 (.xlsx)
+                            </button>
+                            <span class="text-gray-300">|</span>
+                            <button id="formatJsonBtn" class="text-xs text-gray-500 hover:text-blue-600 underline">格式化 JSON</button>
+                            <button id="clearSamplesBtn" class="text-xs text-red-500 hover:text-red-700 underline">清空</button>
+                        </div>
+                    </div>
+                    <textarea id="sampleJsonInput" rows="10" class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-3 font-mono text-xs bg-gray-50" placeholder="[ { ... } ]"></textarea>
+                    
+                    <div class="flex justify-between items-center mt-4">
+                        <div class="text-sm text-gray-600" id="sampleCountDisplay">当前暂无样本</div>
+                        <button id="loadSamplesBtn" class="px-6 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm font-medium shadow-sm transition">
+                            <i class="fas fa-check mr-1"></i> 加载并验证
+                        </button>
+                    </div>
+                    <div id="sampleValidationMessage" class="mt-2 text-sm text-right h-5"></div>
+                </div>
+
+                <!-- NEW: LLM 原始返回区域 -->
+                <div class="mt-8 border-t pt-6">
+                    <h3 class="text-sm font-semibold text-gray-700 mb-2 flex items-center">
+                        <i class="fas fa-code mr-2 text-gray-500"></i> LLM 实际返回的文本内容 (调试信息)
+                    </h3>
+                    <div id="rawResponseContainer" class="bg-gray-800 p-4 rounded-lg text-white font-mono text-xs overflow-x-auto max-h-60 hide-scrollbar">
+                        <pre id="rawResponseContent" class="whitespace-pre-wrap text-gray-400">调用 LLM 自动生成样本后，模型实际输出的原始文本（通常是 JSON 字符串）将显示在此处。</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 3. 结果 Tab -->
+        <div id="tab-results" class="tab-content hidden animate-fade-in">
+            <div class="bg-white shadow-lg rounded-xl p-6 border border-gray-100 min-h-[600px]">
+                
+                <div class="flex justify-between items-center mb-6">
+                    <div>
+                        <h2 class="text-lg font-bold text-gray-800">测试结果看板</h2>
+                        <p class="text-xs text-gray-500 mt-1">运行批量测试并对结果进行打分</p>
+                    </div>
+                    <div class="flex items-center gap-3">
+                         <div id="batchStatusText" class="text-sm text-gray-600 hidden">准备中...</div>
+                        <button id="batchSettingsBtn" class="px-3 py-2.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium shadow-sm transition flex items-center text-sm" title="批量测试设置">
+                            <i class="fas fa-cog"></i>
+                        </button>
+                        <button id="clearResultsBtn" class="px-3 py-2.5 bg-red-50 text-red-600 border border-red-100 rounded-lg hover:bg-red-100 font-medium shadow-sm transition flex items-center text-sm" title="清空所有结果">
+                            <i class="fas fa-trash-alt"></i>
+                        </button>
+                        <input type="file" id="importResultsInput" class="hidden" accept=".xlsx, .xls">
+                        <button onclick="document.getElementById('importResultsInput').click()" class="px-4 py-2.5 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 font-medium shadow-sm transition flex items-center text-sm">
+                            <i class="fas fa-file-import mr-2 text-blue-600"></i> 导入结果 (.xlsx)
+                        </button>
+                        <button id="exportResultsBtn" class="px-4 py-2.5 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 font-medium shadow-sm transition flex items-center text-sm">
+                            <i class="fas fa-file-export mr-2 text-green-600"></i> 导出结果 (.xlsx)
+                        </button>
+                        <button onclick="window.generatePrompts()" class="px-4 py-2.5 bg-indigo-50 text-indigo-600 border border-indigo-100 rounded-lg hover:bg-indigo-100 font-medium shadow-sm transition flex items-center text-sm">
+                            <i class="fas fa-magic mr-2"></i> 生成 Prompts
+                        </button>
+                        <button id="startBatchGenerationBtn" class="px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium shadow-md transition flex items-center">
+                            <i class="fas fa-play mr-2"></i> 开始批量测试
+                        </button>
+                    </div>
+                </div>
+
+                <!-- AI 自动评分配置区域 -->
+                <div class="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-100 rounded-lg p-4 mb-6">
+                    <div class="flex justify-between items-start gap-4">
+                        <div class="flex-grow">
+                            <label class="block text-xs font-bold text-green-800 mb-1"><i class="fas fa-gavel mr-1"></i> AI 自动评分指令 (System Prompt)</label>
+                            <textarea id="scoringSystemPromptInput" rows="2" class="w-full rounded-md border-green-200 shadow-sm focus:border-green-500 focus:ring-green-500 p-2 text-xs resize-y text-gray-700 font-mono bg-white" placeholder="设置评分标准..."></textarea>
+                        </div>
+                        <div class="flex flex-col justify-end h-full pt-5">
+                             <button id="startAiScoringBtn" class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm font-medium shadow-md transition whitespace-nowrap">
+                                <i class="fas fa-robot mr-1"></i> 开始 AI 评分
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="overflow-x-auto rounded-lg border border-gray-200">
+                    <table id="resultsTable" class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-12">#</th>
+                                <!-- 动态插入变量列 -->
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/4">Prompt 预览</th>
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">LLM 输出</th>
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">AI 评分</th>
+                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-32">人工评分</th>
+                            </tr>
+                        </thead>
+                        <tbody id="resultsTableBody" class="bg-white divide-y divide-gray-200">
+                            <tr><td colspan="10" class="px-6 py-10 text-center text-sm text-gray-500">请先在“测试样本”页面加载数据。</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- 全局模态框：文本详情 -->
+    <div id="detailModal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-50 z-50 flex items-center justify-center backdrop-blur-sm">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-6xl mx-4 flex flex-col max-h-[90vh]">
+            <div class="p-4 border-b flex justify-between items-center bg-gray-50 rounded-t-xl">
+                <h3 id="detailModalTitle" class="font-bold text-gray-800">内容详情</h3>
+                <button onclick="closeDetailModal()" class="text-gray-400 hover:text-gray-600 focus:outline-none">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="p-6 overflow-y-auto flex-grow">
+                <textarea id="detailModalTextarea" class="w-full h-full min-h-[300px] p-4 border rounded-lg bg-gray-50 font-mono text-sm focus:ring-blue-500 focus:border-blue-500 outline-none resize-none" readonly></textarea>
+            </div>
+            <div class="p-4 border-t flex justify-end gap-2">
+                <button id="detailSaveBtn" class="hidden px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium transition">保存修改</button>
+                <button onclick="closeDetailModal()" class="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded text-sm font-medium transition">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 审阅模态框 -->
+    <div id="reviewModal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-50 z-50 flex items-center justify-center backdrop-blur-sm">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-7xl mx-4 flex flex-col h-[90vh]">
+            <div class="p-4 border-b flex justify-between items-center bg-gray-50 rounded-t-xl">
+                <h3 id="reviewModalTitle" class="font-bold text-gray-800">人工审阅</h3>
+                <button onclick="closeReviewModal()" class="text-gray-400 hover:text-gray-600 focus:outline-none">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            
+            <div class="flex-grow flex flex-col md:flex-row overflow-hidden">
+                <!-- Prompt Column -->
+                <div class="flex-1 flex flex-col border-r border-gray-200 p-4 bg-gray-50">
+                    <h4 class="font-semibold text-gray-700 mb-2 text-sm flex items-center"><i class="fas fa-terminal mr-2 text-gray-400"></i>Prompt 预览</h4>
+                    <textarea id="reviewPromptText" class="flex-grow w-full p-3 border rounded-lg bg-white font-mono text-sm resize-none focus:ring-blue-500 focus:border-blue-500 outline-none" readonly></textarea>
+                </div>
+                
+                <!-- Output Column -->
+                <div class="flex-1 flex flex-col p-4 bg-white">
+                    <h4 class="font-semibold text-gray-700 mb-2 text-sm flex items-center"><i class="fas fa-robot mr-2 text-blue-500"></i>LLM Output</h4>
+                    <textarea id="reviewOutputText" class="flex-grow w-full p-3 border rounded-lg bg-gray-50 font-mono text-sm resize-none focus:ring-blue-500 focus:border-blue-500 outline-none" readonly></textarea>
+                </div>
+            </div>
+
+            <div class="p-4 border-t bg-gray-50 flex justify-between items-center">
+                <div class="flex items-center gap-4">
+                    <span class="text-sm font-bold text-gray-700">人工评分:</span>
+                    <div class="star-rating" id="reviewStarRating">
+                        <input type="radio" id="review-star5" name="review-rating" value="5" onclick="updateReviewScore(5)" /><label for="review-star5" title="5 stars">★</label>
+                        <input type="radio" id="review-star4" name="review-rating" value="4" onclick="updateReviewScore(4)" /><label for="review-star4" title="4 stars">★</label>
+                        <input type="radio" id="review-star3" name="review-rating" value="3" onclick="updateReviewScore(3)" /><label for="review-star3" title="3 stars">★</label>
+                        <input type="radio" id="review-star2" name="review-rating" value="2" onclick="updateReviewScore(2)" /><label for="review-star2" title="2 stars">★</label>
+                        <input type="radio" id="review-star1" name="review-rating" value="1" onclick="updateReviewScore(1)" /><label for="review-star1" title="1 star">★</label>
+                    </div>
+                </div>
+                <div class="flex gap-2">
+                    <button onclick="closeReviewModal()" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded text-sm font-medium transition">关闭</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 进度模态框 -->
+    <div id="progressModal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-60 z-50 flex items-center justify-center backdrop-blur-sm">
+        <div class="bg-white rounded-xl shadow-2xl p-8 max-w-sm w-full text-center">
+            <div class="mb-4 text-blue-600 text-4xl animate-pulse">
+                <i class="fas fa-robot"></i>
+            </div>
+            <h3 class="text-xl font-bold text-gray-900 mb-2">正在生成中...</h3>
+            <p id="progressMessage" class="text-sm text-gray-600 mb-6">正在请求 API 接口</p>
+            
+            <div class="w-full bg-gray-200 rounded-full h-2.5 mb-2 overflow-hidden">
+                <div id="progressBar" class="bg-blue-600 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+            <p id="progressCount" class="text-xs text-gray-500 text-right">0/0</p>
+
+            <button id="minimizeProgressBtn" onclick="minimizeProgress()" class="mt-6 w-full px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 transition">
+                <i class="fas fa-window-minimize mr-2"></i> 后台运行
+            </button>
+            <button id="closeProgressBtn" class="hidden mt-2 w-full px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md text-sm font-medium transition">完成</button>
+        </div>
+    </div>
+
+    <!-- 最小化进度条 -->
+    <div id="minimizedProgress" class="hidden fixed bottom-6 right-6 bg-white shadow-2xl rounded-xl p-4 border border-blue-100 flex items-center gap-4 z-50 animate-bounce-in ring-1 ring-black ring-opacity-5">
+        <div class="text-blue-600 text-xl"><i class="fas fa-circle-notch fa-spin"></i></div>
+        <div>
+            <div class="text-sm font-bold text-gray-800">批量测试进行中...</div>
+            <div id="miniProgressText" class="text-xs text-gray-500 font-mono mt-0.5">0/0</div>
+        </div>
+        <button onclick="restoreProgressModal()" class="ml-2 p-2 text-gray-400 hover:text-blue-600 transition rounded-full hover:bg-blue-50" title="展开详情">
+            <i class="fas fa-expand-alt"></i>
+        </button>
+    </div>
+
+    <!-- 批量测试设置模态框 -->
+    <div id="batchSettingsModal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-50 z-50 flex items-center justify-center backdrop-blur-sm">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 p-6">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold text-gray-800">批量测试设置</h3>
+                <button onclick="document.getElementById('batchSettingsModal').classList.add('hidden')" class="text-gray-400 hover:text-gray-600">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">并发请求数 (Concurrency)</label>
+                    <input type="number" id="settingConcurrency" min="1" max="10" class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 text-sm" placeholder="1">
+                    <p class="text-xs text-gray-500 mt-1">同时发送给模型的请求数量。建议 1-5。</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Temperature (随机性)</label>
+                    <div class="flex items-center gap-2">
+                        <input type="range" id="settingTemperature" min="0" max="2" step="0.1" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                        <span id="settingTemperatureVal" class="text-sm font-mono w-8">0.7</span>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Max Tokens (最大长度)</label>
+                    <input type="number" id="settingMaxTokens" min="64" max="32768" step="64" class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 text-sm" placeholder="10240">
+                </div>
+            </div>
+            <div class="mt-6 flex justify-end gap-3">
+                <button onclick="document.getElementById('batchSettingsModal').classList.add('hidden')" class="px-4 py-2 bg-gray-100 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-200 transition">取消</button>
+                <button id="saveBatchSettingsBtn" class="px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 transition">保存配置</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // -------------------------------------------------------------------------
+        // 核心逻辑 (Standalone Mode)
+        // -------------------------------------------------------------------------
+
+        // 1. 数据保存辅助函数 (LocalStorage)
+        let saveTimeout;
+        const showSaveStatus = () => {
+            const el = document.getElementById('saveStatus');
+            el.style.opacity = '1';
+            setTimeout(() => el.style.opacity = '0', 2000);
+        };
+
+        window.appData.saveProjectData = async () => {
+            clearTimeout(saveTimeout);
+            saveTimeout = setTimeout(() => {
+                try {
+                    localStorage.setItem('prompt_tuner_project', JSON.stringify(window.appData.project));
+                    showSaveStatus();
+                } catch (e) {
+                    console.error("Auto-save failed:", e);
+                }
+            }, 1000); // 1秒延迟保存
+        };
+
+        window.appData.loadProjectData = async () => {
+            try {
+                const dataStr = localStorage.getItem('prompt_tuner_project');
+                if (dataStr) {
+                    const data = JSON.parse(dataStr);
+                    // 合并数据
+                    window.appData.project = { ...window.appData.project, ...data };
+                }
+                window.appData.initializeUI();
+            } catch (e) {
+                console.error("Load failed:", e);
+                window.appData.initializeUI();
+            }
+        };
+
+        // 导出项目
+        window.appData.exportProject = () => {
+            const exportData = {
+                ...window.appData.project,
+                exportVersion: '1.0',
+                exportDate: new Date().toISOString()
+            };
+            const dataStr = JSON.stringify(exportData, null, 2);
+            const blob = new Blob([dataStr], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `prompt_project_${new Date().toISOString().slice(0,10)}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        };
+
+        // 导入项目
+        window.appData.importProject = (input) => {
+            const file = input.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    
+                    // 简单校验
+                    if (!data.template && !data.samples && !data.results && !data.variables) {
+                        throw new Error("无效的项目文件结构");
+                    }
+
+                    window.appData.project = { ...window.appData.project, ...data };
+                    
+                    // 确保数组字段存在
+                    if (!Array.isArray(window.appData.project.variables)) window.appData.project.variables = [];
+                    if (!Array.isArray(window.appData.project.samples)) window.appData.project.samples = [];
+                    if (!Array.isArray(window.appData.project.results)) window.appData.project.results = [];
+
+                    window.appData.saveProjectData();
+                    window.appData.initializeUI();
+                    
+                    const sCount = window.appData.project.samples.length;
+                    const rCount = window.appData.project.results.length;
+                    alert(`项目导入成功！\n已加载 ${sCount} 个样本，${rCount} 条测试结果。`);
+                } catch (err) {
+                    console.error(err);
+                    alert("导入失败：文件格式错误或已损坏");
+                }
+            };
+            reader.readAsText(file);
+            input.value = ''; // reset
+        };
+
+        // 2. UI 初始化与渲染
+        window.appData.initializeUI = () => {
+            const p = window.appData.project;
+            
+            // 填充 inputs
+            document.getElementById('promptTemplate').value = p.template || '';
+            document.getElementById('modelUrl').value = p.modelUrl || '';
+            
+            // 处理模型选择框
+            const select = document.getElementById('modelName');
+            if (p.modelName) {
+                let exists = false;
+                for (let i = 0; i < select.options.length; i++) {
+                    if (select.options[i].value === p.modelName) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                     const opt = document.createElement('option');
+                     opt.value = p.modelName;
+                     opt.textContent = p.modelName + " (已保存)";
+                     select.appendChild(opt);
+                }
+                select.value = p.modelName;
+            }
+            
+            document.getElementById('metaPromptInput').value = p.metaPrompt || '';
+            document.getElementById('sampleGenSystemPromptInput').value = p.sampleGenSystemPrompt || "你是一个测试数据生成助手。请根据用户要求生成 JSON 数组。\n数组中每个对象必须包含且仅包含以下键：{VARIABLES}。\n直接返回 JSON 数组，不要包含 Markdown 标记或额外解释。\n请生成 5 条数据。";
+            document.getElementById('scoringSystemPromptInput').value = p.scoringSystemPrompt || "你是一个公正的评判助手。请根据用户的输入 Prompt 和模型的输出 Output，对输出质量进行打分（1-5分）。\n请返回 JSON 格式，包含 score (数字) 和 reason (字符串) 两个字段。\n例如：{\"score\": 4, \"reason\": \"回答准确，但略显啰嗦。\"}";
+            
+            // 渲染变量列表
+            renderVariableList(p.variables);
+            
+            // 渲染样本 JSON
+            if (p.samples && p.samples.length > 0) {
+                document.getElementById('sampleJsonInput').value = JSON.stringify(p.samples, null, 2);
+                document.getElementById('sampleCountDisplay').textContent = `已加载 ${p.samples.length} 个样本`;
+            }
+
+            // 渲染结果表
+            renderResultsTable();
+        };
+
+        const renderVariableList = (vars) => {
+            const renderTo = (containerId) => {
+                const container = document.getElementById(containerId);
+                if (!container) return;
+                
+                container.innerHTML = '';
+                if (!vars || vars.length === 0) {
+                    container.innerHTML = '<span class="text-gray-400 text-xs italic">暂无变量，请点击上方解析按钮</span>';
+                    return;
+                }
+                vars.forEach(v => {
+                    const tag = document.createElement('span');
+                    tag.className = 'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800';
+                    tag.textContent = v;
+                    container.appendChild(tag);
+                });
+            };
+
+            renderTo('variableList');
+            renderTo('sampleVariableList');
+        };
+
+        // 3. 事件监听器绑定
+        
+        // Tab 切换
+        document.querySelectorAll('.tab-button').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const targetId = e.currentTarget.dataset.tab;
+                document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+                
+                e.currentTarget.classList.add('active');
+                document.getElementById(`tab-${targetId}`).classList.remove('hidden');
+            });
+        });
+
+        // 解析变量
+        document.getElementById('extractVariablesBtn').addEventListener('click', () => {
+            const template = document.getElementById('promptTemplate').value;
+            const matches = [...template.matchAll(/{{(.+?)}}/g)];
+            const vars = Array.from(new Set(matches.map(m => m[1].trim())));
+            
+            window.appData.project.variables = vars;
+            window.appData.project.template = template;
+            renderVariableList(vars);
+            window.appData.saveProjectData();
+            
+            // 提示用户
+            if(vars.length > 0) {
+                alert(`已提取 ${vars.length} 个变量: ${vars.join(', ')}`);
+            } else {
+                alert("未发现变量，请使用 {{变量名}} 格式在模板中定义。");
+            }
+        });
+
+        // 监听配置输入变化
+        ['promptTemplate', 'modelUrl', 'metaPromptInput'].forEach(id => {
+            document.getElementById(id).addEventListener('input', (e) => {
+                const key = id === 'metaPromptInput' ? 'metaPrompt' : 
+                            id === 'promptTemplate' ? 'template' : id;
+                window.appData.project[key] = e.target.value;
+                window.appData.saveProjectData();
+            });
+        });
+
+        document.getElementById('sampleGenSystemPromptInput').addEventListener('input', (e) => {
+            window.appData.project.sampleGenSystemPrompt = e.target.value;
+            window.appData.saveProjectData();
+        });
+
+        document.getElementById('scoringSystemPromptInput').addEventListener('input', (e) => {
+            window.appData.project.scoringSystemPrompt = e.target.value;
+            window.appData.saveProjectData();
+        });
+
+        // 监听模型选择变化
+        document.getElementById('modelName').addEventListener('change', (e) => {
+            window.appData.project.modelName = e.target.value;
+            window.appData.saveProjectData();
+        });
+
+        // 获取模型列表 (Direct API Call)
+        document.getElementById('fetchModelsBtn').addEventListener('click', async () => {
+            const modelUrl = window.appData.project.modelUrl;
+            const statusEl = document.getElementById('fetchModelStatus');
+            const selectEl = document.getElementById('modelName');
+
+            if (!modelUrl) {
+                alert("请先填写 API 地址");
+                return;
+            }
+
+            statusEl.textContent = "正在获取模型列表...";
+            statusEl.className = "text-[10px] text-blue-500 mt-1 h-4";
+
+            try {
+                // 移除末尾斜杠
+                const baseUrl = modelUrl.replace(/\/$/, '');
+                const response = await fetch(`${baseUrl}/models`, {
+                    method: 'GET',
+                    headers: { 
+                        'Authorization': 'Bearer EMPTY' // 兼容 vLLM
+                    }
+                });
+
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                
+                const data = await response.json();
+                const models = data.data || [];
+
+                // 清空并重新填充 Select
+                selectEl.innerHTML = '<option value="" disabled>请选择模型...</option>';
+                models.forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m.id;
+                    opt.textContent = m.id;
+                    selectEl.appendChild(opt);
+                });
+
+                if (window.appData.project.modelName && models.some(m => m.id === window.appData.project.modelName)) {
+                    selectEl.value = window.appData.project.modelName;
+                } else if (models.length > 0) {
+                    selectEl.value = models[0].id;
+                    window.appData.project.modelName = models[0].id;
+                    window.appData.saveProjectData();
+                }
+
+                statusEl.textContent = `成功获取 ${models.length} 个模型`;
+                statusEl.className = "text-[10px] text-green-500 mt-1 h-4";
+
+            } catch (e) {
+                console.error(e);
+                statusEl.textContent = "获取失败: " + e.message;
+                statusEl.className = "text-[10px] text-red-500 mt-1 h-4";
+                alert("无法连接到模型服务器。请检查 URL 是否正确，以及是否允许跨域 (CORS)。");
+            }
+        });
+
+
+        // 样本相关逻辑
+        document.getElementById('formatJsonBtn').addEventListener('click', () => {
+            try {
+                const val = document.getElementById('sampleJsonInput').value;
+                const obj = JSON.parse(val);
+                document.getElementById('sampleJsonInput').value = JSON.stringify(obj, null, 2);
+            } catch(e) {}
+        });
+        
+        document.getElementById('clearSamplesBtn').addEventListener('click', () => {
+            if(confirm('确定清空所有样本数据吗？')) {
+                document.getElementById('sampleJsonInput').value = '[]';
+                window.appData.project.samples = [];
+                window.appData.project.results = [];
+                document.getElementById('rawResponseContent').textContent = '调用 LLM 自动生成样本后，模型实际输出的原始文本（通常是 JSON 字符串）将显示在此处。';
+                window.appData.saveProjectData();
+                window.appData.initializeUI();
+            }
+        });
+
+        // 导出样本 Excel
+        document.getElementById('exportSamplesBtn').addEventListener('click', () => {
+            const samples = window.appData.project.samples;
+            if (!samples || samples.length === 0) {
+                alert("没有可导出的样本数据");
+                return;
+            }
+            
+            const ws = XLSX.utils.json_to_sheet(samples);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Samples");
+            XLSX.writeFile(wb, `test_samples_${new Date().toISOString().slice(0,10)}.xlsx`);
+        });
+
+        // 导入样本 Excel
+        document.getElementById('importSamplesInput').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const firstSheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[firstSheetName];
+                    const jsonData = XLSX.utils.sheet_to_json(worksheet);
+                    
+                    if (jsonData.length === 0) {
+                        alert("Excel 文件为空或无法解析");
+                        return;
+                    }
+
+                    const currentSamples = window.appData.project.samples || [];
+                    const currentResults = window.appData.project.results || [];
+                    const startId = currentResults.length;
+
+                    const newResults = jsonData.map((s, i) => {
+                        return {
+                            id: startId + i,
+                            sampleData: s,
+                            fullPrompt: '',
+                            output: '',
+                            score: 0
+                        };
+                    });
+
+                    window.appData.project.samples = [...currentSamples, ...jsonData];
+                    window.appData.project.results = [...currentResults, ...newResults];
+                    window.appData.saveProjectData();
+                    
+                    // 更新 UI
+                    document.getElementById('sampleJsonInput').value = JSON.stringify(window.appData.project.samples, null, 2);
+                    document.getElementById('sampleCountDisplay').textContent = `已加载 ${window.appData.project.samples.length} 个样本`;
+                    renderResultsTable();
+                    
+                    alert(`成功导入 ${jsonData.length} 条样本`);
+                } catch (err) {
+                    console.error(err);
+                    alert("导入失败：" + err.message);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+            e.target.value = ''; // reset
+        });
+
+        document.getElementById('loadSamplesBtn').addEventListener('click', () => {
+            const input = document.getElementById('sampleJsonInput').value;
+            const msgEl = document.getElementById('sampleValidationMessage');
+            try {
+                const samples = JSON.parse(input);
+                if (!Array.isArray(samples)) throw new Error("JSON 必须是数组格式");
+                
+                const requiredVars = window.appData.project.variables;
+                const invalidIdx = samples.findIndex(s => !requiredVars.every(v => v in s));
+                
+                if (invalidIdx !== -1 && requiredVars.length > 0) {
+                    throw new Error(`第 ${invalidIdx+1} 个样本缺少必要的变量字段`);
+                }
+
+                const currentSamples = window.appData.project.samples || [];
+                const currentResults = window.appData.project.results || [];
+                const startId = currentResults.length;
+
+                const newResults = samples.map((s, i) => {
+                    return {
+                        id: startId + i,
+                        sampleData: s,
+                        fullPrompt: '',
+                        output: '',
+                        score: 0
+                    };
+                });
+
+                window.appData.project.samples = [...currentSamples, ...samples];
+                window.appData.project.results = [...currentResults, ...newResults];
+                window.appData.saveProjectData();
+                
+                msgEl.textContent = `验证通过，已追加 ${samples.length} 个样本`;
+                msgEl.className = "mt-2 text-sm text-right h-5 text-green-600";
+                document.getElementById('sampleCountDisplay').textContent = `当前共 ${window.appData.project.samples.length} 个样本`;
+                renderResultsTable();
+
+            } catch (e) {
+                msgEl.textContent = "错误: " + e.message;
+                msgEl.className = "mt-2 text-sm text-right h-5 text-red-600";
+            }
+        });
+
+        // 4. vLLM 调用 (Direct API Call)
+        const callVLLM = async (promptText, options = {}) => {
+            const { modelUrl, modelName } = window.appData.project;
+            if (!modelName) throw new Error("未选择模型");
+
+            const baseUrl = modelUrl.replace(/\/$/, '');
+            const response = await fetch(`${baseUrl}/chat/completions`, {
+                method: 'POST',
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer EMPTY'
+                },
+                body: JSON.stringify({
+                    model: modelName,
+                    messages: [{ role: "user", content: promptText }],
+                    max_tokens: options.maxTokens || 10240,
+                    temperature: options.temperature !== undefined ? options.temperature : 0.7
+                })
+            });
+
+            if (!response.ok) {
+                const errText = await response.text();
+                throw new Error(`API Error: ${response.status} - ${errText}`);
+            }
+            
+            // 返回原始文本供后续解析
+            return await response.text();
+        };
+
+        // 生成样本 (Direct API Call + JS Parsing)
+        document.getElementById('generateSamplesBtn').addEventListener('click', async () => {
+            const metaPrompt = document.getElementById('metaPromptInput').value;
+            const vars = window.appData.project.variables;
+            const statusEl = document.getElementById('generationSampleStatus');
+            const rawContentEl = document.getElementById('rawResponseContent');
+            const { modelUrl, modelName } = window.appData.project;
+
+            if (!metaPrompt || vars.length === 0) {
+                alert("请确保已填写生成指令，并已在配置页提取了变量。");
+                return;
+            }
+            if (!modelName) {
+                alert("请先在配置页面选择一个模型。");
+                return;
+            }
+
+            statusEl.textContent = "正在请求 API 生成样本...";
+            statusEl.className = "mt-2 text-xs font-medium h-4 text-blue-600";
+            document.getElementById('generateSamplesBtn').disabled = true;
+            rawContentEl.textContent = '等待响应...';
+            rawContentEl.className = "whitespace-pre-wrap text-gray-400";
+
+            try {
+                let systemPromptTemplate = window.appData.project.sampleGenSystemPrompt;
+                if (!systemPromptTemplate) {
+                     systemPromptTemplate = "你是一个测试数据生成助手。请根据用户要求生成 JSON 数组。\n数组中每个对象必须包含且仅包含以下键：{VARIABLES}。\n直接返回 JSON 数组，不要包含 Markdown 标记或额外解释。\n请生成 5 条数据。";
+                }
+                const systemPrompt = systemPromptTemplate.replace('{VARIABLES}', JSON.stringify(vars));
+
+                const baseUrl = modelUrl.replace(/\/$/, '');
+                const response = await fetch(`${baseUrl}/chat/completions`, {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer EMPTY'
+                    },
+                    body: JSON.stringify({
+                        model: modelName,
+                        messages: [
+                            { role: "system", content: systemPrompt },
+                            { role: "user", content: metaPrompt }
+                        ],
+                        max_tokens: 40960,
+                        temperature: 0.8
+                    })
+                });
+
+                if (!response.ok) throw new Error(`API Error: ${response.status}`);
+                
+                const data = await response.json();
+                const text = data.choices?.[0]?.message?.content || "";
+                
+                // 显示原始响应
+                rawContentEl.textContent = text;
+                rawContentEl.className = "whitespace-pre-wrap text-white";
+
+                // JS 解析逻辑 (模拟后端的清洗)
+                let jsonStr = text.trim();
+                // 尝试提取 [] 之间的内容
+                const match = jsonStr.match(/\[[\s\S]*\]/);
+                if (match) {
+                    jsonStr = match[0];
+                } else {
+                    jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '');
+                }
+
+                let samples;
+                try {
+                    samples = JSON.parse(jsonStr);
+                } catch (e) {
+                    throw new Error("无法解析 JSON: " + e.message);
+                }
+
+                if (!Array.isArray(samples)) throw new Error("返回的不是 JSON 数组");
+
+                document.getElementById('sampleJsonInput').value = JSON.stringify(samples, null, 2);
+                statusEl.textContent = "生成成功！请点击下方的“加载”按钮。";
+                statusEl.className = "mt-2 text-xs font-medium h-4 text-green-600";
+
+            } catch (e) {
+                rawContentEl.textContent += `\n\n[Error] ${e.message}`;
+                statusEl.textContent = "生成失败";
+                statusEl.className = "mt-2 text-xs font-medium h-4 text-red-600";
+                rawContentEl.className = "whitespace-pre-wrap text-red-400";
+            } finally {
+                document.getElementById('generateSamplesBtn').disabled = false;
+            }
+        });
+
+        // 导出结果 Excel
+        document.getElementById('exportResultsBtn').addEventListener('click', () => {
+            const results = window.appData.project.results;
+            if (!results || results.length === 0) {
+                alert("没有可导出的结果数据");
+                return;
+            }
+
+            const flatData = results.map(row => {
+                const base = { ...row.sampleData };
+                base['完整_Prompt'] = row.fullPrompt;
+                base['LLM_输出'] = row.output;
+                base['AI_评分'] = row.aiScore;
+                base['AI_评分理由'] = row.aiReason;
+                base['人工评分'] = row.score;
+                return base;
+            });
+
+            const ws = XLSX.utils.json_to_sheet(flatData);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Results");
+            XLSX.writeFile(wb, `test_results_${new Date().toISOString().slice(0,10)}.xlsx`);
+        });
+
+        // 导入结果 Excel
+        document.getElementById('importResultsInput').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const firstSheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[firstSheetName];
+                    const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+                    if (jsonData.length === 0) {
+                        alert("Excel 文件为空或无法解析");
+                        return;
+                    }
+
+                    if (!confirm(`即将导入 ${jsonData.length} 条结果，这将追加到现有数据。是否继续？`)) {
+                        return;
+                    }
+
+                    const newSamples = [];
+                    const newResults = [];
+                    
+                    jsonData.forEach((row, i) => {
+                        const sampleData = {};
+                        let fullPrompt = '';
+                        let output = '';
+                        let score = 0;
+
+                        Object.keys(row).forEach(key => {
+                            if (key === '完整_Prompt') fullPrompt = row[key] || '';
+                            else if (key === 'LLM_输出') output = row[key] || '';
+                            else if (key === '人工评分') score = parseInt(row[key]) || 0;
+                            else {
+                                sampleData[key] = row[key];
+                            }
+                        });
+
+                        newSamples.push(sampleData);
+                        newResults.push({
+                            id: 0, // 临时ID，后面统一修正
+                            sampleData: sampleData,
+                            fullPrompt: fullPrompt,
+                            output: output,
+                            score: score
+                        });
+                    });
+
+                    // 尝试自动更新变量列表（如果当前为空）
+                    if (newSamples.length > 0 && (!window.appData.project.variables || window.appData.project.variables.length === 0)) {
+                        const vars = Object.keys(newSamples[0]);
+                        window.appData.project.variables = vars;
+                        renderVariableList(vars);
+                    }
+
+                    const startId = window.appData.project.results.length;
+                    newResults.forEach((r, idx) => r.id = startId + idx);
+
+                    window.appData.project.samples = [...window.appData.project.samples, ...newSamples];
+                    window.appData.project.results = [...window.appData.project.results, ...newResults];
+                    
+                    window.appData.saveProjectData();
+                    
+                    // 更新 UI
+                    document.getElementById('sampleJsonInput').value = JSON.stringify(window.appData.project.samples, null, 2);
+                    document.getElementById('sampleCountDisplay').textContent = `已加载 ${window.appData.project.samples.length} 个样本`;
+                    renderResultsTable();
+
+                    alert(`成功导入 ${newResults.length} 条结果`);
+
+                } catch (err) {
+                    console.error(err);
+                    alert("导入失败：" + err.message);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+            e.target.value = '';
+        });
+
+        // 批量测试逻辑
+        window.generatePrompts = () => {
+            const template = window.appData.project.template;
+            const vars = window.appData.project.variables;
+            const results = window.appData.project.results;
+            
+            if(!results || results.length === 0) { alert("请先加载样本"); return; }
+
+            results.forEach(item => {
+                 let prompt = template;
+                 vars.forEach(v => {
+                     prompt = prompt.replace(new RegExp(`{{${v}}}`, 'g'), item.sampleData[v] || '');
+                 });
+                 item.fullPrompt = prompt;
+            });
+            window.appData.saveProjectData();
+            renderResultsTable();
+            alert(`已为 ${results.length} 条样本生成 Prompt`);
+        };
+
+        document.getElementById('startBatchGenerationBtn').addEventListener('click', async () => {
+            const results = window.appData.project.results;
+            const template = window.appData.project.template;
+            const config = window.appData.project.batchConfig || { concurrency: 1, temperature: 0.7, maxTokens: 10240 };
+            
+            if (results.length === 0) {
+                alert("没有可测试的样本，请先加载样本。");
+                return;
+            }
+            if (!window.appData.project.modelName) {
+                alert("请在配置页面选择模型。");
+                return;
+            }
+
+            const modal = document.getElementById('progressModal');
+            const pBar = document.getElementById('progressBar');
+            const pMsg = document.getElementById('progressMessage');
+            const pCount = document.getElementById('progressCount');
+            const closeBtn = document.getElementById('closeProgressBtn');
+            const minimizeBtn = document.getElementById('minimizeProgressBtn');
+            
+            modal.classList.remove('hidden');
+            closeBtn.classList.add('hidden');
+            minimizeBtn.classList.remove('hidden');
+            
+            let completed = 0;
+            const total = results.length;
+            
+            const queue = [...results.map((item, index) => ({ item, index }))];
+            const concurrency = Math.max(1, config.concurrency || 1);
+            
+            pMsg.textContent = `准备开始，并发数: ${concurrency}`;
+
+            const worker = async () => {
+                while (queue.length > 0) {
+                    const { item, index } = queue.shift();
+                    
+                    pMsg.textContent = `正在生成第 ${index + 1} 个样本... (剩余: ${queue.length})`;
+                    document.getElementById('miniProgressText').textContent = `${completed}/${total} - 正在生成 #${index + 1}`;
+                    
+                    // 优先使用已存在的 fullPrompt (支持手动修改)，否则自动生成
+                    let prompt = item.fullPrompt;
+                    if (!prompt) {
+                        prompt = template;
+                        window.appData.project.variables.forEach(v => {
+                            prompt = prompt.replace(new RegExp(`{{${v}}}`, 'g'), item.sampleData[v] || '');
+                        });
+                        item.fullPrompt = prompt;
+                    }
+
+                    try {
+                        const rawResponseText = await callVLLM(prompt, {
+                            temperature: parseFloat(config.temperature),
+                            maxTokens: parseInt(config.maxTokens)
+                        }); 
+                        
+                        const rawData = JSON.parse(rawResponseText);
+                        // 只展示 message.content，不做额外处理
+                        const content = rawData.choices?.[0]?.message?.content;
+                        item.output = content !== undefined ? content : JSON.stringify(rawData, null, 2);
+                    } catch (e) {
+                        let errorMsg = e.message;
+                        item.output = `[Error] ${errorMsg}`;
+                    }
+
+                    completed++;
+                    const percentage = (completed / total) * 100;
+                    pBar.style.width = `${percentage}%`;
+                    pCount.textContent = `${completed}/${total}`;
+                    document.getElementById('miniProgressText').textContent = `${completed}/${total}`;
+                    
+                    if (completed % 5 === 0 || completed === total) {
+                        window.appData.saveProjectData();
+                        renderResultsTable(); 
+                    }
+                }
+            };
+
+            const workers = Array(concurrency).fill(null).map(() => worker());
+            await Promise.all(workers);
+
+            pMsg.textContent = "批量测试完成！";
+            pCount.textContent = `${total}/${total}`;
+            document.getElementById('miniProgressText').textContent = "完成";
+            
+            closeBtn.classList.remove('hidden');
+            minimizeBtn.classList.add('hidden');
+            
+            // 如果当前是最小化状态，自动恢复
+            if (!document.getElementById('minimizedProgress').classList.contains('hidden')) {
+                restoreProgressModal();
+            }
+            
+            renderResultsTable();
+            
+            closeBtn.onclick = () => {
+                modal.classList.add('hidden');
+            };
+        });
+
+        // AI 评分逻辑
+        document.getElementById('startAiScoringBtn').addEventListener('click', async () => {
+            const results = window.appData.project.results;
+            const systemPrompt = window.appData.project.scoringSystemPrompt;
+            const config = window.appData.project.batchConfig || { concurrency: 1 };
+            
+            if (results.length === 0) { alert("没有可评分的结果。"); return; }
+            if (!window.appData.project.modelName) { alert("请选择模型。"); return; }
+            if (!systemPrompt) { alert("请设置评分指令。"); return; }
+
+            const modal = document.getElementById('progressModal');
+            const pBar = document.getElementById('progressBar');
+            const pMsg = document.getElementById('progressMessage');
+            const pCount = document.getElementById('progressCount');
+            const closeBtn = document.getElementById('closeProgressBtn');
+            const minimizeBtn = document.getElementById('minimizeProgressBtn');
+            
+            modal.classList.remove('hidden');
+            closeBtn.classList.add('hidden');
+            minimizeBtn.classList.remove('hidden');
+            
+            let completed = 0;
+            const total = results.length;
+            const queue = [...results.map((item, index) => ({ item, index }))];
+            const concurrency = Math.max(1, config.concurrency || 1);
+            
+            pMsg.textContent = `开始 AI 评分...`;
+
+            const worker = async () => {
+                while (queue.length > 0) {
+                    const { item, index } = queue.shift();
+                    
+                    if (!item.output) {
+                        completed++;
+                        continue;
+                    }
+
+                    pMsg.textContent = `正在评分第 ${index + 1} 个样本...`;
+                    document.getElementById('miniProgressText').textContent = `${completed}/${total} - 评分 #${index + 1}`;
+
+                    try {
+                        const userContent = `Prompt:\n${item.fullPrompt}\n\nOutput:\n${item.output}`;
+                        
+                        // Call LLM
+                        const { modelUrl, modelName } = window.appData.project;
+                        const baseUrl = modelUrl.replace(/\/$/, '');
+                        const response = await fetch(`${baseUrl}/chat/completions`, {
+                            method: 'POST',
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Authorization': 'Bearer EMPTY'
+                            },
+                            body: JSON.stringify({
+                                model: modelName,
+                                messages: [
+                                    { role: "system", content: systemPrompt }, // 评分专用 System Prompt
+                                    { role: "user", content: userContent }     // 包含 Prompt 和 Output 的内容
+                                ],
+                                temperature: 0.1
+                            })
+                        });
+
+                        if (response.ok) {
+                            const data = await response.json();
+                            const text = data.choices?.[0]?.message?.content || "";
+                            
+                            // Parse JSON
+                            let jsonStr = text.trim();
+                            const match = jsonStr.match(/\{[\s\S]*\}/);
+                            if (match) jsonStr = match[0];
+                            else jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '');
+
+                            try {
+                                const scoreData = JSON.parse(jsonStr);
+                                item.aiScore = scoreData.score;
+                                item.aiReason = scoreData.reason;
+                            } catch (e) {
+                                console.error("Failed to parse score JSON", e);
+                                item.aiReason = "解析失败: " + text;
+                            }
+                        }
+                    } catch (e) {
+                        console.error(e);
+                    }
+
+                    completed++;
+                    const percentage = (completed / total) * 100;
+                    pBar.style.width = `${percentage}%`;
+                    pCount.textContent = `${completed}/${total}`;
+                    document.getElementById('miniProgressText').textContent = `${completed}/${total}`;
+                    
+                    if (completed % 5 === 0 || completed === total) {
+                        window.appData.saveProjectData();
+                        renderResultsTable();
+                    }
+                }
+            };
+
+            const workers = Array(concurrency).fill(null).map(() => worker());
+            await Promise.all(workers);
+
+            pMsg.textContent = "AI 评分完成！";
+            closeBtn.classList.remove('hidden');
+            minimizeBtn.classList.add('hidden');
+            if (!document.getElementById('minimizedProgress').classList.contains('hidden')) {
+                restoreProgressModal();
+            }
+            renderResultsTable();
+            closeBtn.onclick = () => modal.classList.add('hidden');
+        });
+
+        // 设置相关逻辑
+        document.getElementById('batchSettingsBtn').addEventListener('click', () => {
+            const config = window.appData.project.batchConfig || { concurrency: 1, temperature: 0.7, maxTokens: 10240 };
+            document.getElementById('settingConcurrency').value = config.concurrency;
+            document.getElementById('settingTemperature').value = config.temperature;
+            document.getElementById('settingTemperatureVal').textContent = config.temperature;
+            document.getElementById('settingMaxTokens').value = config.maxTokens;
+            document.getElementById('batchSettingsModal').classList.remove('hidden');
+        });
+
+        document.getElementById('settingTemperature').addEventListener('input', (e) => {
+            document.getElementById('settingTemperatureVal').textContent = e.target.value;
+        });
+
+        document.getElementById('saveBatchSettingsBtn').addEventListener('click', () => {
+            const concurrency = parseInt(document.getElementById('settingConcurrency').value) || 1;
+            const temperature = parseFloat(document.getElementById('settingTemperature').value) || 0.7;
+            const maxTokens = parseInt(document.getElementById('settingMaxTokens').value) || 10240;
+
+            window.appData.project.batchConfig = { concurrency, temperature, maxTokens };
+            window.appData.saveProjectData();
+            document.getElementById('batchSettingsModal').classList.add('hidden');
+            alert("配置已保存");
+        });
+
+        // 5. 结果表格渲染
+        window.renderResultsTable = () => {
+            const tbody = document.getElementById('resultsTableBody');
+            const theadRow = document.querySelector('#resultsTable thead tr');
+            const results = window.appData.project.results;
+            const vars = window.appData.project.variables;
+
+            // 现在的静态列有 5 个 (#, Prompt, Output, AI Score, Human Score)
+            while (theadRow.children.length > 5) {
+                theadRow.removeChild(theadRow.children[1]);
+            }
+            
+            const refNode = theadRow.children[1];
+            vars.forEach(v => {
+                const th = document.createElement('th');
+                th.className = "px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24";
+                th.textContent = v;
+                theadRow.insertBefore(th, refNode);
+            });
+
+            tbody.innerHTML = '';
+            if (!results || results.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="10" class="px-6 py-10 text-center text-sm text-gray-500">暂无数据</td></tr>';
+                return;
+            }
+
+            results.forEach((row, index) => {
+                const tr = document.createElement('tr');
+                tr.className = index % 2 === 0 ? 'bg-white' : 'bg-gray-50';
+
+                let html = `<td class="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${index + 1}</td>`;
+
+                vars.forEach(v => {
+                    const val = row.sampleData[v] || '-';
+                    html += `<td class="px-4 py-4 text-sm text-gray-500"><div class="cell-content" title="${val}">${val}</div></td>`;
+                });
+
+                const promptDisplay = row.fullPrompt ? row.fullPrompt : '<span class="text-gray-400 italic">待生成</span>';
+                html += `<td class="px-4 py-4 text-sm text-gray-600">
+                    <div class="cell-content cursor-pointer hover:text-blue-600" onclick="showDetail('完整 Prompt', ${index}, 'prompt')">${promptDisplay}</div>
+                </td>`;
+
+                const outputDisplay = row.output ? row.output : '<span class="text-gray-400 italic">待生成</span>';
+                html += `<td class="px-4 py-4 text-sm text-gray-800">
+                    <div class="cell-content cursor-pointer hover:text-blue-600" onclick="showDetail('模型输出', ${index}, 'output')">${outputDisplay}</div>
+                </td>`;
+
+                // AI Score Column
+                const aiScore = row.aiScore !== undefined ? row.aiScore : '-';
+                const aiReason = row.aiReason || '';
+                const aiColor = aiScore >= 4 ? 'text-green-600' : (aiScore >= 3 ? 'text-yellow-600' : (aiScore === '-' ? 'text-gray-400' : 'text-red-600'));
+                
+                html += `<td class="px-4 py-4 text-sm font-bold ${aiColor}">
+                    <div class="flex items-center gap-2">
+                        <span>${aiScore}</span>
+                        ${aiReason ? `<i class="fas fa-comment-alt text-gray-400 cursor-pointer hover:text-blue-600" onclick="showDetail('AI 评分理由', ${index}, 'aiReason')"></i>` : ''}
+                    </div>
+                </td>`;
+
+                html += `<td class="px-4 py-4 whitespace-nowrap text-sm font-medium">
+                    <div class="flex flex-col items-center gap-2">
+                        <div class="star-rating">
+                            ${[5,4,3,2,1].map(star => `
+                                <input type="radio" id="star-${index}-${star}" name="rating-${index}" value="${star}" ${row.score == star ? 'checked' : ''} onchange="updateScore(${index}, ${star})">
+                                <label for="star-${index}-${star}" title="${star}分"><i class="fas fa-star"></i></label>
+                            `).join('')}
+                        </div>
+                        <div class="text-xs text-gray-400">${row.score > 0 ? row.score + ' 分' : '未评分'}</div>
+                        <div class="flex gap-2 mt-1">
+                            <button onclick="openReviewModal(${index})" class="text-xs text-blue-500 hover:text-blue-700 underline">审阅</button>
+                            <button onclick="deleteResultItem(${index})" class="text-xs text-red-400 hover:text-red-600 underline">删除</button>
+                        </div>
+                    </div>
+                </td>`;
+
+                tr.innerHTML = html;
+                tbody.appendChild(tr);
+            });
+        };
+
+        document.getElementById('clearResultsBtn').addEventListener('click', () => {
+            if (confirm('确定要清空所有测试结果和样本吗？此操作不可恢复。')) {
+                window.appData.project.samples = [];
+                window.appData.project.results = [];
+                window.appData.saveProjectData();
+                renderResultsTable();
+                document.getElementById('sampleCountDisplay').textContent = "当前暂无样本";
+            }
+        });
+
+        window.deleteResultItem = (index) => {
+            if (confirm('确定删除这条测试记录吗？')) {
+                const samples = window.appData.project.samples;
+                const results = window.appData.project.results;
+                
+                samples.splice(index, 1);
+                results.splice(index, 1);
+                
+                results.forEach((r, i) => r.id = i);
+
+                window.appData.project.samples = samples;
+                window.appData.project.results = results;
+                window.appData.saveProjectData();
+                
+                renderResultsTable();
+                document.getElementById('sampleCountDisplay').textContent = `当前共 ${samples.length} 个样本`;
+            }
+        };
+
+        window.updateScore = (index, score) => {
+            window.appData.project.results[index].score = parseInt(score);
+            window.appData.saveProjectData();
+            renderResultsTable(); 
+        };
+
+        window.showDetail = (title, index, type) => {
+            const data = window.appData.project.results[index];
+            let content = "";
+            if (type === 'prompt') content = data.fullPrompt;
+            else if (type === 'output') content = data.output;
+            else if (type === 'aiReason') content = data.aiReason;
+            
+            document.getElementById('detailModalTitle').textContent = `${title} (#${index + 1})`;
+            
+            const textarea = document.getElementById('detailModalTextarea');
+            textarea.value = content || "";
+            
+            // Setup Save Button
+            const saveBtn = document.getElementById('detailSaveBtn');
+            if (type === 'prompt') {
+                textarea.removeAttribute('readonly');
+                textarea.classList.remove('bg-gray-50');
+                textarea.classList.add('bg-white');
+                saveBtn.classList.remove('hidden');
+                saveBtn.onclick = () => {
+                    window.appData.project.results[index].fullPrompt = textarea.value;
+                    window.appData.saveProjectData();
+                    renderResultsTable();
+                    closeDetailModal();
+                };
+            } else {
+                textarea.setAttribute('readonly', 'true');
+                textarea.classList.add('bg-gray-50');
+                textarea.classList.remove('bg-white');
+                saveBtn.classList.add('hidden');
+            }
+            
+            document.getElementById('detailModal').classList.remove('hidden');
+        };
+
+        window.closeDetailModal = () => {
+            document.getElementById('detailModal').classList.add('hidden');
+        };
+
+        window.minimizeProgress = () => {
+            document.getElementById('progressModal').classList.add('hidden');
+            document.getElementById('minimizedProgress').classList.remove('hidden');
+        };
+
+        window.restoreProgressModal = () => {
+            document.getElementById('minimizedProgress').classList.add('hidden');
+            document.getElementById('progressModal').classList.remove('hidden');
+        };
+
+        // 审阅模态框逻辑
+        let currentReviewIndex = -1;
+
+        window.openReviewModal = (index) => {
+            currentReviewIndex = index;
+            const data = window.appData.project.results[index];
+            
+            document.getElementById('reviewModalTitle').textContent = `人工审阅 (#${index + 1})`;
+            document.getElementById('reviewPromptText').value = data.fullPrompt || "";
+            document.getElementById('reviewOutputText').value = data.output || "";
+            
+            // Reset stars
+            const score = data.score || 0;
+            document.querySelectorAll('#reviewStarRating input').forEach(input => {
+                input.checked = parseInt(input.value) === score;
+            });
+
+            document.getElementById('reviewModal').classList.remove('hidden');
+        };
+
+        window.closeReviewModal = () => {
+            document.getElementById('reviewModal').classList.add('hidden');
+        };
+        
+        window.updateReviewScore = (score) => {
+            if (currentReviewIndex !== -1) {
+                window.updateScore(currentReviewIndex, score);
+            }
+        };
+
+    </script>
+</body>
+</html>
